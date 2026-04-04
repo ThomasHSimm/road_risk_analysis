@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+
+# Data — raw and processed data never committed
+data/raw/**
+data/processed/**
+data/features/**
+!data/raw/**/.gitkeep
+!data/processed/.gitkeep
+!data/features/.gitkeep
+!data/external/.gitkeep
+
+# Reports (generated artefacts)
+reports/**
+!reports/.gitkeep
+
+# Notebooks — strip outputs before commit (use nbstripout)
+notebooks/*.ipynb
+
+# Quarto build output
+docs/quarto/_site/
+docs/quarto/.quarto/
+/.quarto/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+*.env
+config/secrets.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/

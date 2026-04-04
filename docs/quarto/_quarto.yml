@@ -1,0 +1,67 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "Road Risk Analysis"
+  description: "Accident risk modelling by road type and vehicle class — Yorkshire pilot"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - text: Data Sources
+        menu:
+          - href: data-sources/stats19.qmd
+            text: STATS19 Collisions
+          - href: data-sources/aadf.qmd
+            text: AADF Traffic Counts
+          - href: data-sources/webtris.qmd
+            text: WebTRIS / MIDAS
+          - href: data-sources/mrdb.qmd
+            text: Major Road Database
+      - text: Methodology
+        menu:
+          - href: methodology/data-joining.qmd
+            text: Joining the Datasets
+          - href: methodology/feature-engineering.qmd
+            text: Feature Engineering
+          - href: methodology/modelling.qmd
+            text: Modelling Approach
+          - href: methodology/covid-handling.qmd
+            text: Handling COVID Years
+      - text: Analysis
+        menu:
+          - href: analysis/eda-collisions.qmd
+            text: Collision EDA
+          - href: analysis/eda-traffic.qmd
+            text: Traffic Volume EDA
+          - href: analysis/vehicle-mix.qmd
+            text: Vehicle Mix Analysis
+          - href: analysis/model-results.qmd
+            text: Model Results & SHAP
+      - href: api-reference/index.qmd
+        text: API Reference
+    right:
+      - icon: github
+        href: https://github.com/your-org/road-risk-analysis
+
+  sidebar: false
+
+  page-footer:
+    left: "Road Risk Analysis"
+    right: "Built with [Quarto](https://quarto.org)"
+
+format:
+  html:
+    theme: cosmo
+    code-fold: true
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    number-sections: false
+    highlight-style: github
+
+execute:
+  freeze: auto          # re-render only when source changes
+  cache: true
+  warning: false

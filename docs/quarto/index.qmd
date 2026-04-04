@@ -1,0 +1,44 @@
+---
+title: "Road Risk Analysis"
+subtitle: "Accident risk modelling by road type and vehicle class"
+---
+
+## Overview
+
+This project combines three complementary datasets to model road accident risk
+across Yorkshire (pilot), with a view to scaling across Great Britain.
+
+| Dataset | Provider | Role |
+|---|---|---|
+| STATS19 | DfT | Collision, vehicle, and casualty records |
+| AADF | DfT | Traffic volume by road link and vehicle type |
+| WebTRIS / MIDAS | National Highways | Vehicle length and sensor counts |
+| MRDB | DfT / OS | Road geometry for spatial joins |
+
+## Geography
+
+**Pilot:** Yorkshire — West Yorkshire (4), South Yorkshire (5),
+North Yorkshire (6), Humberside (7) police force areas.
+
+The pilot covers a mix of motorway (M1, M62, A1(M)), urban, and rural roads,
+providing sufficient variation to train and validate the model before GB rollout.
+
+## Time Range
+
+**2015–2024**, with COVID years (2020–2021) flagged explicitly.
+Some single-year analyses use 2024 only.
+
+## Key Questions
+
+1. How does accident **rate** vary by road class, speed limit, and traffic volume?
+2. What is the contribution of **heavy / long vehicles** to accident severity?
+3. Can we build a reliable **severity classifier** from road and traffic features?
+4. Where are the highest-risk road sections that are **underperforming** relative
+   to comparable roads?
+
+## Navigation
+
+- **Data Sources** — download locations, schemas, known quirks
+- **Methodology** — joining logic, feature engineering, modelling decisions
+- **Analysis** — rendered notebooks with outputs
+- **API Reference** — `src/` module documentation

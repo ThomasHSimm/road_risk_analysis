@@ -1,0 +1,81 @@
+# config/settings.yaml
+# Central config — import via src/config.py
+
+project:
+  name: road-risk-analysis
+  version: "0.1.0"
+
+geography:
+  pilot_region: yorkshire
+  police_force_codes:
+    west_yorkshire: 4
+    south_yorkshire: 5
+    north_yorkshire: 6
+    humberside: 7
+
+years:
+  full_range: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+  pre_covid:  [2015, 2016, 2017, 2018, 2019]
+  covid:      [2020, 2021]
+  post_covid: [2022, 2023, 2024]
+  recent:     [2024]                    # for single-year analyses
+
+paths:
+  raw:
+    stats19:    data/raw/stats19/
+    aadf:       data/raw/aadf/
+    shapefiles: data/raw/shapefiles/
+    webtris:    data/raw/webtris/
+  processed:    data/processed/
+  features:     data/features/
+
+webtris:
+  base_url: "https://webtris.highwaysengland.co.uk/api/v1"
+  report_type: daily
+  page_size: 100                        # max results per API page
+
+stats19:
+  # Columns to keep at each join stage (trim memory)
+  collision_cols:
+    - accident_index
+    - date
+    - time
+    - police_force
+    - accident_severity
+    - number_of_vehicles
+    - number_of_casualties
+    - road_type
+    - speed_limit
+    - junction_detail
+    - light_conditions
+    - weather_conditions
+    - road_surface_conditions
+    - urban_or_rural_area
+    - latitude
+    - longitude
+    - local_authority_highway
+  vehicle_cols:
+    - accident_index
+    - vehicle_reference
+    - vehicle_type
+    - vehicle_manoeuvre
+    - vehicle_location_restricted_lane
+    - skidding_and_overturning
+    - age_of_driver
+    - age_of_vehicle
+    - engine_capacity_cc
+  casualty_cols:
+    - accident_index
+    - vehicle_reference
+    - casualty_reference
+    - casualty_class
+    - sex_of_casualty
+    - age_of_casualty
+    - casualty_severity
+    - casualty_type
+
+model:
+  target: accident_severity            # 1=fatal, 2=serious, 3=slight
+  test_size: 0.2
+  random_state: 42
+  cv_folds: 5

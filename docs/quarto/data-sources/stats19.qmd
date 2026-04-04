@@ -1,0 +1,63 @@
+---
+title: "STATS19 — Road Casualty Statistics"
+---
+
+## Overview
+
+DfT's STATS19 dataset records all personal injury road accidents reported to
+the police in Great Britain. Three linked tables are published per year.
+
+## Download
+
+**Source:** <https://www.gov.uk/government/statistical-data-sets/road-safety-open-data>
+
+Download the **Last 5 years** bundle for 2020–2024, and individual year files
+for 2015–2019. Place all CSVs in `data/raw/stats19/`.
+
+::: {.callout-note}
+The file naming convention changed — files from 2019 onward use `collision`
+in the filename; earlier files use `accident`. The ingest module handles both.
+:::
+
+## Tables
+
+| File | Grain | Key join column |
+|---|---|---|
+| `...-collision-YYYY.csv` | 1 row per accident | `accident_index` |
+| `...-vehicle-YYYY.csv` | 1 row per vehicle involved | `accident_index` |
+| `...-casualty-YYYY.csv` | 1 row per casualty | `accident_index` |
+
+## Key Variables Used
+
+### Collision table
+- `accident_severity` — 1 Fatal, 2 Serious, 3 Slight *(model target)*
+- `road_type`, `speed_limit`, `junction_detail`
+- `light_conditions`, `weather_conditions`, `road_surface_conditions`
+- `urban_or_rural_area`
+- `latitude`, `longitude` — for spatial join to MRDB / AADF
+
+### Vehicle table
+- `vehicle_type` — car, HGV, motorcycle, bus, etc.
+- `age_of_driver`, `age_of_vehicle`
+- `vehicle_manoeuvre`
+
+### Casualty table
+- `casualty_severity`, `casualty_type`, `casualty_class`
+
+## Known Issues
+
+- `junction_detail` had an error corrected in the November 2025 release — ensure
+  you download the latest versions of all files.
+- 2020–2021 volumes are substantially lower due to COVID lockdowns.
+- A small number of records have missing or implausible lat/lon — these are
+  dropped in `clean.py`.
+
+## Loading
+
+```python
+from src.ingest_stats19 import load_stats19, join_stats19
+
+data = load_stats19("data/raw/stats19", years=list(range(2015, 2025)))
+collisions = data["collision"]   # ~50k rows for Yorkshire
+joined     = join_stats19(data)
+```

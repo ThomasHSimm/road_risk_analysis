@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "road-risk-analysis"
+version = "0.1.0"
+description = "Accident risk modelling by road type and vehicle class"
+requires-python = ">=3.11"
+dependencies = [
+    # Data
+    "pandas>=2.2",
+    "geopandas>=0.14",
+    "pyarrow>=15",          # parquet support
+    "requests>=2.31",
+    "pytris>=0.2.6",
+    "shapely>=2.0",
+
+    # Modelling
+    "scikit-learn>=1.4",
+    "xgboost>=2.0",
+    "shap>=0.44",
+    "imbalanced-learn>=0.12",
+
+    # Visualisation
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "plotly>=5.20",
+    "folium>=0.16",
+
+    # App
+    "streamlit>=1.33",
+    "streamlit-folium>=0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "ipykernel",
+    "jupyterlab",
+    "pre-commit",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["road_risk", "road_risk.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=src --cov-report=term-missing"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
