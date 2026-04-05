@@ -53,10 +53,13 @@ _DEFAULT_YEARS = cfg["years"]["full_range"]
 # Yorkshire bounding box WGS84
 YORKSHIRE_BBOX = {
     "min_lat": 53.30,
-    "max_lat": 54.60,
-    "min_lon": -2.20,
-    "max_lon": -0.08,
+    "max_lat": 54.50,
+    "min_lon": -2.80,
+    "max_lon":  0.00,
 }
+
+# Years to pull — pre-COVID baseline, COVID anomaly, recent normal
+TARGET_YEARS = [2019, 2021, 2023]
 
 # Seconds to wait between API calls
 _API_DELAY = 0.5
@@ -191,12 +194,16 @@ def get_yorkshire_sites(cache_folder: Path | None = None) -> pd.DataFrame:
     all_sites = get_all_sites(cache_folder=cache_folder)
 
     has_coords = all_sites["latitude"].notna() & all_sites["longitude"].notna()
-    in_bbox = all_sites[has_coords].apply(
+    is_active = all_sites["status"].str.strip().str.lower() == "active"
+    in_bbox = all_sites[has_coords & is_active].apply(
         lambda r: _in_yorkshire_bbox(float(r["latitude"]), float(r["longitude"])),
         axis=1,
     )
-    yorkshire = all_sites[has_coords][in_bbox].copy()
-    logger.info(f"Yorkshire sites: {len(yorkshire)} / {len(all_sites)} total")
+    yorkshire = all_sites[has_coords & is_active][in_bbox].copy().reset_index(drop=True)
+    logger.info(
+        f"Yorkshire active sites: {len(yorkshire)} / {len(all_sites)} total "
+        f"({(~is_active).sum()} inactive filtered out)"
+    )
     return yorkshire
 
 
@@ -366,7 +373,7 @@ def pull_yorkshire(
     with vehicle length proportion columns added.
     """
     if years is None:
-        years = _DEFAULT_YEARS
+        years = TARGET_YEARS
 
     raw_folder = Path(raw_folder)
     output_folder = Path(output_folder)
@@ -458,8 +465,32 @@ def combine_raw(
     if not chunks:
         raise FileNotFoundError(f"No chunk parquets found in {raw_folder}")
 
+    # Load Yorkshire active site IDs to exclude old GB-wide chunks
+    sites_cache = raw_folder / "sites.parquet"
+    yorkshire_ids: set | None = None
+    if sites_cache.exists():
+        all_sites = pd.read_parquet(sites_cache)
+        is_active = all_sites["status"].str.strip().str.lower() == "active"
+        in_bbox = (
+            all_sites["latitude"].between(YORKSHIRE_BBOX["min_lat"], YORKSHIRE_BBOX["max_lat"])
+            & all_sites["longitude"].between(YORKSHIRE_BBOX["min_lon"], YORKSHIRE_BBOX["max_lon"])
+        )
+        yorkshire_ids = set(all_sites[is_active & in_bbox]["site_id"].astype(str))
+        logger.info(f"Filtering to {len(yorkshire_ids)} Yorkshire active sites")
+
     logger.info(f"Combining {len(chunks)} chunk files from {raw_folder}")
-    frames = [pd.read_parquet(c) for c in chunks]
+    frames = []
+    skipped = 0
+    for c in chunks:
+        # Extract site_id from filename: site_12345_2019.parquet
+        site_id_str = c.stem.split("_")[1]
+        if yorkshire_ids is not None and site_id_str not in yorkshire_ids:
+            skipped += 1
+            continue
+        frames.append(pd.read_parquet(c))
+
+    if skipped:
+        logger.info(f"  Skipped {skipped} non-Yorkshire chunks")
     combined = pd.concat(frames, ignore_index=True)
     combined = _add_length_proportions(combined)
     logger.info(

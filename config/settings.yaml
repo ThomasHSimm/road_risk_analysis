@@ -37,11 +37,11 @@ webtris:
 stats19:
   # Columns to keep at each join stage (trim memory)
   collision_cols:
-    - accident_index
+    - collision_index
     - date
     - time
     - police_force
-    - accident_severity
+    - collision_severity
     - number_of_vehicles
     - number_of_casualties
     - road_type
@@ -55,7 +55,7 @@ stats19:
     - longitude
     - local_authority_highway
   vehicle_cols:
-    - accident_index
+    - collision_index
     - vehicle_reference
     - vehicle_type
     - vehicle_manoeuvre
@@ -65,7 +65,7 @@ stats19:
     - age_of_vehicle
     - engine_capacity_cc
   casualty_cols:
-    - accident_index
+    - collision_index
     - vehicle_reference
     - casualty_reference
     - casualty_class
@@ -75,7 +75,7 @@ stats19:
     - casualty_type
 
 model:
-  target: accident_severity            # 1=fatal, 2=serious, 3=slight
+  target: collision_severity            # 1=fatal, 2=serious, 3=slight
   test_size: 0.2
   random_state: 42
   cv_folds: 5

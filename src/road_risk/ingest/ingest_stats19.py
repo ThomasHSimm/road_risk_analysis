@@ -144,10 +144,11 @@ def _load_single(
     # Normalise column names: lowercase, strip whitespace
     df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
 
-    # Filter by year if specified (look for 'year' column in data)
-    if years is not None and "year" in df.columns:
+    # Filter by year if specified — handle both 'year' and 'collision_year' column names
+    year_col = next((c for c in ["year", "collision_year"] if c in df.columns), None)
+    if years is not None and year_col:
         before = len(df)
-        df = df[df["year"].isin(years)]
+        df = df[df[year_col].isin(years)]
         logger.info(f"    Filtered {before:,} → {len(df):,} rows (year in {years})")
 
     # Pre-filter vehicle/casualty to Yorkshire collision indices
