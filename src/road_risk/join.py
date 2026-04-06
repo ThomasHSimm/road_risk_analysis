@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 # CRS
 WGS84 = "EPSG:4326"
-BNG   = "EPSG:27700"   # British National Grid — metres, used for distance calcs
+BNG = "EPSG:27700"  # British National Grid — metres, used for distance calcs
 
 # Stage 2 spatial fallback distance cap (metres)
 SPATIAL_CAP_M = 100
@@ -96,6 +96,7 @@ WEBTRIS_FEATURE_COLS = [
 # ---------------------------------------------------------------------------
 # 1. Snap collisions to road links
 # ---------------------------------------------------------------------------
+
 
 def snap_collisions_to_roads(
     collisions: pd.DataFrame,
@@ -139,8 +140,11 @@ def snap_collisions_to_roads(
 
     # --- Prepare collisions GeoDataFrame ------------------------------------
     # Only snap collisions with valid coordinates
-    valid = collisions["coords_valid"].fillna(False) if "coords_valid" in collisions.columns \
+    valid = (
+        collisions["coords_valid"].fillna(False)
+        if "coords_valid" in collisions.columns
         else pd.Series(True, index=collisions.index)
+    )
 
     coll_gdf = gpd.GeoDataFrame(
         collisions[valid].copy(),
@@ -156,14 +160,13 @@ def snap_collisions_to_roads(
     roads_bng = openroads.to_crs(BNG)
 
     # Output columns
-    coll_bng["link_id"]         = pd.NA
+    coll_bng["link_id"] = pd.NA
     coll_bng["snap_distance_m"] = np.nan
-    coll_bng["snap_method"]     = "unmatched"
+    coll_bng["snap_method"] = "unmatched"
 
     # --- Stage 1: Attribute match -------------------------------------------
     named = coll_bng[
-        coll_bng["road_name_clean"].notna() &
-        (coll_bng["road_name_clean"] != "")
+        coll_bng["road_name_clean"].notna() & (coll_bng["road_name_clean"] != "")
     ]
     logger.info(f"  Stage 1: {len(named):,} collisions have a named road")
 
@@ -173,9 +176,11 @@ def snap_collisions_to_roads(
         if road_links.empty:
             continue
         matched = _nearest_link(group, road_links)
-        coll_bng.loc[matched.index, "link_id"]         = matched["link_id"].values
-        coll_bng.loc[matched.index, "snap_distance_m"] = matched["snap_distance_m"].values
-        coll_bng.loc[matched.index, "snap_method"]     = "attribute"
+        coll_bng.loc[matched.index, "link_id"] = matched["link_id"].values
+        coll_bng.loc[matched.index, "snap_distance_m"] = matched[
+            "snap_distance_m"
+        ].values
+        coll_bng.loc[matched.index, "snap_method"] = "attribute"
         stage1_matched += len(matched)
 
     logger.info(
@@ -192,8 +197,10 @@ def snap_collisions_to_roads(
         within_cap = matched2["snap_distance_m"] <= spatial_cap_m
         n_within = within_cap.sum()
 
-        coll_bng.loc[matched2.index, "link_id"]         = matched2["link_id"].values
-        coll_bng.loc[matched2.index, "snap_distance_m"] = matched2["snap_distance_m"].values
+        coll_bng.loc[matched2.index, "link_id"] = matched2["link_id"].values
+        coll_bng.loc[matched2.index, "snap_distance_m"] = matched2[
+            "snap_distance_m"
+        ].values
         coll_bng.loc[matched2[within_cap].index, "snap_method"] = "spatial"
 
         logger.info(
@@ -207,10 +214,12 @@ def snap_collisions_to_roads(
     # Append rows with invalid coordinates (unsnappable — no link_id)
     if (~valid).any():
         invalid_rows = collisions[~valid].copy()
-        invalid_rows["link_id"]         = pd.NA
+        invalid_rows["link_id"] = pd.NA
         invalid_rows["snap_distance_m"] = np.nan
-        invalid_rows["snap_method"]     = "invalid_coords"
-        invalid_gdf = gpd.GeoDataFrame(invalid_rows, geometry=[None]*len(invalid_rows), crs=WGS84)
+        invalid_rows["snap_method"] = "invalid_coords"
+        invalid_gdf = gpd.GeoDataFrame(
+            invalid_rows, geometry=[None] * len(invalid_rows), crs=WGS84
+        )
         coll_out = pd.concat([coll_out, invalid_gdf], ignore_index=True)
 
     # Summary
@@ -259,6 +268,7 @@ def _nearest_link(
 # 2. Build road features (AADF + WebTRIS per MRDB link per year)
 # ---------------------------------------------------------------------------
 
+
 def build_road_features(
     openroads: gpd.GeoDataFrame,
     aadf: pd.DataFrame,
@@ -283,9 +293,7 @@ def build_road_features(
     -------
     DataFrame at link_id × year grain with traffic features.
     """
-    logger.info(
-        f"Building road features (OpenRoads × AADF × WebTRIS) — spatial joins"
-    )
+    logger.info(f"Building road features (OpenRoads × AADF × WebTRIS) — spatial joins")
 
     # --- WebTRIS → AADF spatial join ----------------------------------------
     if webtris is not None and not webtris.empty:
@@ -294,8 +302,14 @@ def build_road_features(
 
     # Trim AADF to feature columns
     webtris_cols = [
-        c for c in ["mean_daily_flow", "large_vehicle_pct",
-                    "mean_weekday_flow", "large_vehicle_weekday_pct", "site_id"]
+        c
+        for c in [
+            "mean_daily_flow",
+            "large_vehicle_pct",
+            "mean_weekday_flow",
+            "large_vehicle_weekday_pct",
+            "site_id",
+        ]
         if c in aadf.columns
     ]
     aadf_keep = [c for c in AADF_FEATURE_COLS + webtris_cols if c in aadf.columns]
@@ -335,7 +349,9 @@ def build_road_features(
         joined = joined[~joined.index.duplicated(keep="first")]
 
         # Nullify features beyond snap cap — distant match is not meaningful
-        feature_cols = [c for c in aadf_keep if c not in ["latitude", "longitude", "year"]]
+        feature_cols = [
+            c for c in aadf_keep if c not in ["latitude", "longitude", "year"]
+        ]
         beyond_cap = joined["aadf_snap_distance_m"] > aadf_snap_cap_m
         n_beyond = beyond_cap.sum()
         if n_beyond:
@@ -352,28 +368,40 @@ def build_road_features(
         # --- Street name fallback for links still beyond cap ----------------
         # For OpenRoads links with a street_name_clean, try matching to AADF
         # road_name_clean (normalised) — recovers named roads without numbers.
-        if "street_name_clean" in openroads.columns and "road_name_clean" in aadf_trim.columns:
-            still_beyond = beyond_cap & (
-                openroads.set_index("link_id")
-                .loc[joined["link_id"].values, "street_name_clean"]
-                .values != ""
-            ) if "link_id" in joined.columns else beyond_cap
+        if (
+            "street_name_clean" in openroads.columns
+            and "road_name_clean" in aadf_trim.columns
+        ):
+            still_beyond = (
+                beyond_cap
+                & (
+                    openroads.set_index("link_id")
+                    .loc[joined["link_id"].values, "street_name_clean"]
+                    .values
+                    != ""
+                )
+                if "link_id" in joined.columns
+                else beyond_cap
+            )
 
-            aadf_named = aadf_yr[
-                aadf_yr.get("road_name_clean", pd.Series("", index=aadf_yr.index)) != ""
-            ] if "road_name_clean" in aadf_yr.columns else pd.DataFrame()
+            aadf_named = (
+                aadf_yr[
+                    aadf_yr.get("road_name_clean", pd.Series("", index=aadf_yr.index))
+                    != ""
+                ]
+                if "road_name_clean" in aadf_yr.columns
+                else pd.DataFrame()
+            )
 
             if still_beyond.any() and not aadf_named.empty:
                 # Normalise AADF road_name for matching
-                aadf_name_map = (
-                    aadf_yr.assign(
-                        aadf_name_norm=aadf_yr.get(
-                            "road_name_clean",
-                            pd.Series("", index=aadf_yr.index)
-                        ).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+                aadf_name_map = aadf_yr.assign(
+                    aadf_name_norm=aadf_yr.get(
+                        "road_name_clean", pd.Series("", index=aadf_yr.index)
                     )
-                    .set_index("aadf_name_norm")
-                )
+                    .str.upper()
+                    .str.replace(r"[^A-Z0-9]", "", regex=True)
+                ).set_index("aadf_name_norm")
                 links_beyond = joined[still_beyond]["link_id"]
                 or_streets = openroads.set_index("link_id")["street_name_clean"]
                 n_name_matched = 0
@@ -387,7 +415,9 @@ def build_road_features(
                             if fc in row.index:
                                 joined.loc[joined["link_id"] == lid, fc] = row[fc]
                         joined.loc[joined["link_id"] == lid, "aadf_snap_distance_m"] = 0
-                        joined.loc[joined["link_id"] == lid, "aadf_join_method"] = "name_match"
+                        joined.loc[joined["link_id"] == lid, "aadf_join_method"] = (
+                            "name_match"
+                        )
                         n_name_matched += 1
                 if n_name_matched:
                     logger.info(
@@ -409,7 +439,9 @@ def build_road_features(
         )
 
     if not spatial_rows:
-        logger.error("No AADF data joined — check aadf_clean.parquet exists and has rows")
+        logger.error(
+            "No AADF data joined — check aadf_clean.parquet exists and has rows"
+        )
         return pd.DataFrame()
 
     road_features = pd.concat(spatial_rows, ignore_index=True)
@@ -456,8 +488,11 @@ def _attach_webtris_to_aadf(
     result_frames = []
     for year in aadf["year"].unique():
         aadf_yr = aadf_gdf[aadf_gdf["year"] == year].copy()
-        wt_yr   = wt_gdf[wt_gdf["year"] == year][wt_cols + ["geometry"]] if "year" in wt_gdf.columns \
+        wt_yr = (
+            wt_gdf[wt_gdf["year"] == year][wt_cols + ["geometry"]]
+            if "year" in wt_gdf.columns
             else wt_gdf[wt_cols + ["geometry"]]
+        )
 
         if wt_yr.empty:
             result_frames.append(aadf_yr.drop(columns=["geometry"]))
@@ -470,7 +505,9 @@ def _attach_webtris_to_aadf(
             distance_col="webtris_snap_distance_m",
         )
         joined = joined[~joined.index.duplicated(keep="first")]
-        result_frames.append(joined.drop(columns=["geometry", "index_right"], errors="ignore"))
+        result_frames.append(
+            joined.drop(columns=["geometry", "index_right"], errors="ignore")
+        )
 
     return pd.concat(result_frames, ignore_index=True)
 
@@ -478,6 +515,7 @@ def _attach_webtris_to_aadf(
 # ---------------------------------------------------------------------------
 # 3. Build road_link × year final table
 # ---------------------------------------------------------------------------
+
 
 def build_road_link_annual(
     collisions_snapped: gpd.GeoDataFrame,
@@ -500,6 +538,24 @@ def build_road_link_annual(
         col["year"] = pd.to_datetime(col["date"], errors="coerce").dt.year
 
     snapped = col[col["snap_method"].isin(["attribute", "spatial", "weighted"])].copy()
+
+    # Snap quality filter — remove low-confidence matches that add noise to the model.
+    # With correct coordinates, the snap distance distribution has a natural break
+    # at score ~0.6 / distance ~100m. Below this threshold snaps are likely landing
+    # on the wrong road (parallel minor road, opposite carriageway, etc).
+    # Threshold chosen so retained count (~40k) matches historical high-quality baseline.
+    # Analysis (April 2026): score>0.6 retains 51.8% of matches, score<0.6 are
+    # predominantly far snaps (>100m) on Unclassified/Unknown roads.
+    if "snap_score" in snapped.columns:
+        n_before = len(snapped)
+        snapped = snapped[snapped["snap_score"] >= 0.6]
+        n_after = len(snapped)
+        logger.info(
+            f"  Snap quality filter (score>=0.6): "
+            f"{n_after:,} / {n_before:,} collisions retained "
+            f"({n_after/n_before:.1%})"
+        )
+
     logger.info(
         f"  Using {len(snapped):,} / {len(col):,} snapped collisions "
         f"({len(snapped)/len(col):.1%})"
@@ -512,18 +568,16 @@ def build_road_link_annual(
         snapped["involves_hgv"] = False
 
     agg = (
-        snapped
-        .groupby(["link_id", "year"])
+        snapped.groupby(["link_id", "year"])
         .agg(
-            collision_count            =("collision_index", "count"),
-            fatal_count                =("collision_severity", lambda x: (x == 1).sum()),
-            serious_count              =("collision_severity", lambda x: (x == 2).sum()),
-            slight_count               =("collision_severity", lambda x: (x == 3).sum()),
-            casualty_count             =("number_of_casualties", "sum"),
-            hgv_collision_count        =("involves_hgv", "sum"),
+            collision_count=("collision_index", "count"),
+            fatal_count=("collision_severity", lambda x: (x == 1).sum()),
+            serious_count=("collision_severity", lambda x: (x == 2).sum()),
+            slight_count=("collision_severity", lambda x: (x == 3).sum()),
+            casualty_count=("number_of_casualties", "sum"),
+            hgv_collision_count=("involves_hgv", "sum"),
             mean_vehicles_per_collision=("number_of_vehicles", "mean"),
-            pct_attribute_snapped      =("snap_method",
-                                         lambda x: (x == "attribute").mean()),
+            pct_attribute_snapped=("snap_method", lambda x: (x == "attribute").mean()),
         )
         .reset_index()
     )
@@ -540,11 +594,19 @@ def build_road_link_annual(
     result = agg.merge(road_feat, on=["link_id", "year"], how="left")
 
     # Attach OpenRoads road metadata — single road_name, no duplicates
-    or_meta = openroads[[
-        "link_id", "road_name", "road_name_clean",
-        "road_classification", "road_function", "form_of_way",
-        "link_length_km", "is_trunk", "is_primary",
-    ]].copy()
+    or_meta = openroads[
+        [
+            "link_id",
+            "road_name",
+            "road_name_clean",
+            "road_classification",
+            "road_function",
+            "form_of_way",
+            "link_length_km",
+            "is_trunk",
+            "is_primary",
+        ]
+    ].copy()
     # Drop link_length_km from result if already there from AADF to avoid dupe
     if "link_length_km" in result.columns:
         or_meta = or_meta.drop(columns=["link_length_km"])
@@ -566,6 +628,7 @@ def build_road_link_annual(
     # --- COVID flag ---------------------------------------------------------
     if "is_covid" not in result.columns:
         from road_risk.clean import COVID_YEARS
+
         result["is_covid"] = result["year"].isin(COVID_YEARS)
 
     logger.info(
@@ -581,6 +644,7 @@ def build_road_link_annual(
 # ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
+
 
 def save_road_link_annual(
     df: pd.DataFrame,
@@ -600,6 +664,7 @@ def save_road_link_annual(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     """
     Load all cleaned parquets, run the full join pipeline, and save
@@ -616,7 +681,7 @@ def main() -> None:
     logger.info("Loading cleaned data ...")
 
     collisions = pd.read_parquet(processed / "stats19/collision_clean.parquet")
-    aadf       = pd.read_parquet(processed / "aadf/aadf_clean.parquet")
+    aadf = pd.read_parquet(processed / "aadf/aadf_clean.parquet")
 
     # OS Open Roads — load from processed cache or raw GeoPackage
     or_path = processed / "shapefiles/openroads_yorkshire.parquet"
@@ -626,13 +691,16 @@ def main() -> None:
     else:
         logger.info("OS Open Roads cache not found — loading from GeoPackage ...")
         from road_risk.ingest.ingest_openroads import load_openroads, save_openroads
+
         openroads = load_openroads()
         save_openroads(openroads, processed / "shapefiles")
 
     webtris_path = processed / "webtris/webtris_clean.parquet"
     webtris = pd.read_parquet(webtris_path) if webtris_path.exists() else None
     if webtris is None:
-        logger.warning("WebTRIS clean parquet not found — proceeding without sensor features")
+        logger.warning(
+            "WebTRIS clean parquet not found — proceeding without sensor features"
+        )
 
     # --- Run pipeline -------------------------------------------------------
     # Prefer snap.py weighted output if it exists — it uses multi-criteria
@@ -662,12 +730,18 @@ def main() -> None:
     print(f"  Years   : {sorted(result['year'].unique())}")
     print(f"  Columns : {result.columns.tolist()}")
     if "collision_rate_per_mvkm" in result.columns:
-        print(f"  Collision rate (median): {result['collision_rate_per_mvkm'].median():.4f}")
+        print(
+            f"  Collision rate (median): {result['collision_rate_per_mvkm'].median():.4f}"
+        )
     if "pct_attribute_snapped" in result.columns:
-        print(f"  Mean % attribute-snapped: {result['pct_attribute_snapped'].mean():.1%}")
+        print(
+            f"  Mean % attribute-snapped: {result['pct_attribute_snapped'].mean():.1%}"
+        )
     if "road_classification" in result.columns:
         print(f"\n  Road classification breakdown:")
-        print(result.groupby("road_classification")["collision_count"].sum().to_string())
+        print(
+            result.groupby("road_classification")["collision_count"].sum().to_string()
+        )
 
     save_road_link_annual(result)
 

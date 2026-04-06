@@ -12,6 +12,7 @@ build/
 data/raw/**
 data/processed/**
 data/features/**
+data/models/**
 !data/raw/**/.gitkeep
 !data/processed/.gitkeep
 !data/features/.gitkeep

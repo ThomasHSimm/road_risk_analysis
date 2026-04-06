@@ -33,11 +33,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Yorkshire police force codes in STATS19
+# Yorkshire police force codes as used in the STATS19 collision CSV.
+# Source: DfT data guide Excel, sheet '2024_code_list', filter field name = 'police_force'
+# To verify or rebuild this dict from the Excel:
+#   import pandas as pd
+#   df = pd.read_excel('dft-road-casualty-statistics-...-data-guide-2024.xlsx',
+#                      sheet_name='2024_code_list')
+#   pf = df[df['field name']=='police_force'][['code/format','label']].dropna()
+#   YORKSHIRE_FORCES = {int(r['code/format']): r['label'] for _, r in pf.iterrows()
+#                       if r['label'] in YORKSHIRE_FORCE_NAMES}
+# NOTE: codes 4=Lancashire, 5=Merseyside, 6=Greater Manchester, 7=Cheshire.
+# Those are NW England forces — not Yorkshire. A previous version of this file
+# had those wrong codes, which caused the pipeline to load NW England data instead.
+YORKSHIRE_FORCE_NAMES = {
+    "North Yorkshire", "West Yorkshire", "South Yorkshire", "Humberside"
+}
 YORKSHIRE_FORCE_CODES = {
-    4: "West Yorkshire",
-    5: "South Yorkshire",
-    6: "North Yorkshire",
-    7: "Humberside",
+    12: "North Yorkshire",
+    13: "West Yorkshire",
+    14: "South Yorkshire",
+    16: "Humberside",
 }
 
 # Both naming conventions, tried in order

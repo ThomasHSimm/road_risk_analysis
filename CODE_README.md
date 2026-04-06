@@ -5,19 +5,18 @@ Status of each module in the pipeline.
 | Module | Status | Notes |
 |---|---|---|
 | `config.py` | ✅ Done | YAML loader, `_ROOT`, path helpers |
-| `ingest/ingest_stats19.py` | ✅ Done | Loads 1979-latest CSVs, Yorkshire filter, year filter, pre-filters vehicle/casualty by collision index |
+| `ingest/ingest_stats19.py` | ✅ Done | Loads 1979-latest CSVs, Yorkshire filter (forces 12/13/14/16), pre-filters vehicle/casualty by collision index |
 | `ingest/ingest_aadf.py` | ✅ Done | Reads from zip, bidirectional aggregation, parquet cache |
-| `ingest/ingest_webtris.py` | ✅ Done | pytris API, annual reports, per-site-year chunk saves, Yorkshire active sites only |
-| `ingest/ingest_mrdb.py` | ✅ Done | MRDB shapefile loader, WGS84 reproject |
-| `ingest/ingest_openroads.py` | ✅ Done | OS Open Roads GeoPackage, Yorkshire bbox, road_name_clean |
-| `clean.py` | ✅ Done | SD→SE LSOA-based correction, LSOA validation, COVID flag, year filter 2015–2024, WebTRIS lat/lon fix |
-| `snap.py` | ✅ Done | Weighted multi-criteria snap + quick snap, densified KD-tree at 25m, 40.6% match rate |
-| `join.py` | ✅ Done | Loads snapped_weighted.parquet, builds road_link × year table, AADF + WebTRIS spatial joins |
-| `network_features.py` | ✅ Done | Node degree, betweenness centrality (k=200), dist_to_major, population density (LSOA) |
-| `features.py` | ✅ Done | Target vars, traffic features, road encoding, temporal, lag features, confidence flags |
-| `model.py` | ✅ Done | Stage 1a AADT estimator, Stage 1b temporal profiles, Stage 2 Poisson GLM + XGBoost |
-| `db.py` | ⬜ Not started | PostGIS loader for app queries |
-| `app/` | ⬜ Not started | Streamlit map + risk dashboard |
+| `ingest/ingest_webtris.py` | ✅ Done | WebTRIS API, annual reports, per-site-year chunk saves, Yorkshire active sites only |
+| `ingest/ingest_openroads.py` | ✅ Done | OS Open Roads GeoPackage, Yorkshire bbox, road_name_clean + street_name_clean |
+| `clean.py` | ✅ Done | LSOA validation, COVID flag, target year filters. Note: BNG easting/northing fields have known DfT error — lat/lon used throughout |
+| `snap.py` | ✅ Done | Weighted multi-criteria snap + quick snap, densified geometry KD-tree, 98.6% match rate |
+| `join.py` | ✅ Done | road_link × year table, AADF join, WebTRIS join, snap quality filter (score ≥ 0.6), STATS19 context aggregates |
+| `network_features.py` | ✅ Done | Betweenness, degree, dist_to_major, pop_density, betweenness_relative, OSM speed/lanes/surface/lit |
+| `features.py` | ✅ Done | Target vars, traffic features, road encoding, temporal, lag, confidence flags |
+| `model.py` | ✅ Done | Stage 1a AADT estimator (CV R² 0.723), Stage 1b temporal profiles, Stage 2 Poisson GLM + XGBoost |
+| `db.py` | ⬜ Not started | PostGIS loader |
+| `app/` | ⬜ Not started | Streamlit app |
 
 ---
 
@@ -27,24 +26,28 @@ Status of each module in the pipeline.
 # 1. Ingest — download raw files first (see data/README.md)
 python src/road_risk/ingest/ingest_stats19.py
 python src/road_risk/ingest/ingest_aadf.py
-python src/road_risk/ingest/ingest_webtris.py   # slow ~60 mins
-python src/road_risk/ingest/ingest_mrdb.py
-# ingest_openroads.py runs automatically on first join.py call
+python src/road_risk/ingest/ingest_webtris.py   # slow — ~60 mins
+python src/road_risk/ingest/ingest_openroads.py
 
-# 2. Clean
+# 2. Convert OSM pbf files (download county files from Geofabrik first)
+#    https://download.geofabrik.de/europe/great-britain/england/
+for f in data/raw/osm/*.osm.pbf; do
+    osmium cat "$f" -o "${f%.osm.pbf}.osm"
+done
+
+# 3. Clean
 python src/road_risk/clean.py
 
-# 3. Snap collisions to road links
-python src/road_risk/snap.py                    # ~8 mins
+# 4. Snap collisions to road links
+python src/road_risk/snap.py
 
-# 4. Join — road_link × year feature table
+# 5. Join — build road_link × year feature table
 python src/road_risk/join.py
 
-# 5. Network features — graph centrality + population density
-python src/road_risk/network_features.py        # ~5 mins, cached after first run
-
-# 6. Feature engineering
-python src/road_risk/features.py
+# 6. Network features (first run ~10 mins, cached after)
+python src/road_risk/network_features.py
+# Add OSM attributes (speed limit, lanes, surface, lit) — ~15 mins first run
+python src/road_risk/network_features.py --osm
 
 # 7. Models
 python src/road_risk/model.py --stage traffic     # Stage 1a: AADT estimator
@@ -54,52 +57,72 @@ python src/road_risk/model.py --stage collision   # Stage 2: Poisson risk model
 
 ---
 
-## Key Data Quality Notes
+## Key Data Quality Findings
 
-| Issue | Detail | Resolution |
-|---|---|---|
-| SD→SE BNG grid error | Officers recorded SD grid square instead of SE for some West Yorkshire collisions | Fixed in `clean.py` using LSOA centroid as ground truth — 9 confirmed corrections |
-| Coordinate ceiling | ~60k collisions have coordinates in Lancashire (wrong grid + wrong LSOA) | Unrecoverable — flagged `coords_valid=False`, excluded from snap |
-| Snap rate 40.6% | 60k unsnapped = systematic coordinate error, not random | Ceiling, not a bug. Scatter shows road-shaped patterns in Lancashire |
-| AADF coverage 3 years | Only 2019, 2021, 2023 ingested | 7/10 years have NaN traffic features — solved by Stage 1a AADT estimator |
-| AADF 22km mean distance | Collision links are mostly minor roads, AADF mostly major roads | By design — AADT estimated via ML for all uncounted links |
-| WebTRIS lat/lon missing | Site coordinates dropped during groupby aggregation in clean.py | Fixed — sites.parquet merged into webtris_clean after aggregation |
-| join.py snap method filter | Filter excluded "weighted" snap method, producing empty output | Fixed — `["attribute", "spatial", "weighted"]` |
-| link_length_km from AADF | Only 7 rows had link length — came from AADF not OpenRoads | Fixed — added to `or_meta` merge in `build_road_link_annual()` |
+See `docs/data-quality-notes.md` for full detail. Summary:
 
----
+- **STATS19 police force code bug (fixed April 2026)** — `config/settings.yaml`
+  previously used codes 4–7 (Lancashire/Merseyside/GM/Cheshire) instead of 12–16
+  (Yorkshire). All pipeline outputs before this fix used NW England data.
+  Codes are now documented with a derivation snippet using the DfT data guide Excel.
 
-## Current Output Files
+- **STATS19 BNG coordinate field error (reported to DfT)** — `location_easting_osgr`
+  and `location_northing_osgr` have a systematic grid square prefix error for Yorkshire
+  forces. The `latitude`/`longitude` fields are correct (GPS-derived) and are used
+  throughout. See `notebooks/stats19_coordinate_issue.ipynb` for the full reproducible
+  report. The BNG fields are not used in this pipeline.
 
-| File | Rows | Description |
-|---|---|---|
-| `data/processed/stats19/collision_clean.parquet` | 101,567 | Cleaned 2015–2024 Yorkshire collisions |
-| `data/processed/stats19/snapped_weighted.parquet` | 101,567 | Collisions with road link snap (41,216 matched) |
-| `data/processed/aadf/aadf_clean.parquet` | 5,260 | AADF count points × 3 years |
-| `data/processed/webtris/webtris_clean.parquet` | 6,516 | WebTRIS sites × 3 years with lat/lon |
-| `data/features/road_link_annual.parquet` | 35,996 | Road links with collisions × year |
-| `data/features/network_features.parquet` | 705,672 | Network centrality + population per link |
-| `data/features/model_features.parquet` | 35,996 | Engineered features for modelling |
-| `data/models/aadt_estimates.parquet` | 2,117,016 | Estimated AADT for all links × 3 years |
-| `data/models/risk_scores.parquet` | — | Collision risk scores (after Stage 2) |
+- **Snap rate 98.6%** at mean 16.6m — achieved after force code fix on correct
+  Yorkshire data. A snap quality filter (score ≥ 0.6) removes a further 3% of
+  ambiguous matches.
+
+- **AADF coverage** — 3 years (2019, 2021, 2023), ~287k links matched within 2km.
+  Remaining ~418k links have AADT estimated by Stage 1a model.
+
+- **OSM coverage** — speed limit 43.6%, lanes 5.5%, surface 12.8%, lit 7.2%.
+  Sparse features median-imputed in GLM.
 
 ---
 
-## Confidence Tiers
+## Hardcoded Values — Source Reference
 
-| Tier | Outputs | Basis |
+| Value | File | Derivable from? |
 |---|---|---|
-| **High** | Risk per road segment, comparisons within road type, major road analysis | Measured AADF + snapped collisions |
-| **Medium** | Minor road risk estimates, network-derived features | Modelled AADT, sparser collision data |
-| **Exploratory** | Vehicle-type risk across full network, fine-grained local conclusions | Inferred exposure, noisy denominators |
+| Police force codes 12/13/14/16 | `config/settings.yaml`, `ingest_stats19.py` | DfT data guide Excel — `police_force` field |
+| HGV vehicle types {19,20,21} | `join.py` | DfT data guide Excel — `vehicle_type` field |
+| Road class scores (1=Motorway etc) | `snap.py` | DfT data guide Excel — `first_road_class` field |
+| Junction detail codes | `snap.py` | DfT data guide Excel — `junction_detail` field |
+| COVID years {2020, 2021} | `clean.py`, `model.py` | Domain knowledge — not in Excel |
+| Yorkshire bbox BNG | `ingest_openroads.py` | Spatial — not in Excel |
 
 ---
 
-## Pending
+## Model Results Summary (April 2026)
 
-- Download additional AADF years (2015–2018, 2020, 2022, 2024) to enable collision rate for all years
-- Speed limit feature via OSM/osmnx
-- `db.py` — PostGIS loader
-- Streamlit app
-- DVSA test route case study notebook
-- Kaggle dataset (processed parquets) + `data/README.md` with download instructions
+**Stage 1a — AADT Estimator**
+- CV R²: 0.723 (±0.029) | Training R²: 0.901
+- 17 features: road_class_ord, hgv_proportion, pop_density, betweenness, dist_to_major,
+  lat/lon, link_length, speed_limit_mph, lanes, betweenness_relative, lit, is_unpaved
+- Applied to 705,672 links × 3 years
+
+**Stage 2 — Collision Model**
+- Poisson GLM pseudo-R²: 0.083 | XGBoost pseudo-R²: 0.330
+- 1,910,145 training rows
+- Key GLM effects: degree_mean +0.71, betweenness_relative +0.28,
+  is_a_road -1.21, is_motorway -1.13, year_norm -0.035
+- XGBoost top feature: estimated_aadt (0.305) — exposure dominates
+
+---
+
+## Data Sources
+
+| Source | Location | Coverage |
+|---|---|---|
+| STATS19 collisions | `data/raw/stats19/` | Yorkshire 2015–2024 |
+| AADF traffic counts | `data/raw/aadf/` | Yorkshire 2019, 2021, 2023 |
+| WebTRIS sensor data | `data/raw/webtris/` | Yorkshire motorways/trunk 2019, 2021, 2023 |
+| OS Open Roads | `data/raw/shapefiles/oproad_gb.gpkg` | Yorkshire + 20km buffer |
+| MRDB | `data/raw/shapefiles/MRDB_2024_published.shp` | Yorkshire major roads |
+| OSM pbf files | `data/raw/osm/*.osm` | 4 Yorkshire county files from Geofabrik |
+| LSOA population + area | `data/raw/stats19/lsoa_*.csv` | England & Wales 2021 |
+| DfT data guide Excel | `data/raw/stats19/dft-road-casualty-*-data-guide-2024.xlsx` | Code lookups |

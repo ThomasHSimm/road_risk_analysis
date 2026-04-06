@@ -7,11 +7,20 @@ project:
 
 geography:
   pilot_region: yorkshire
+  # Police force codes as used in the STATS19 collision CSV (police_force field).
+  # Source: DfT data guide Excel, sheet '2024_code_list', filter field name = 'police_force'
+  # To verify or update:
+  #   import pandas as pd
+  #   df = pd.read_excel('dft-road-casualty-statistics-...-data-guide-2024.xlsx',
+  #                      sheet_name='2024_code_list')
+  #   print(df[df['field name']=='police_force'][['code/format','label']])
+  # NOTE: codes 4-7 are Lancashire/Merseyside/Greater Manchester/Cheshire — NOT Yorkshire.
+  # Yorkshire forces are 12-16 as listed below.
   police_force_codes:
-    west_yorkshire: 4
-    south_yorkshire: 5
-    north_yorkshire: 6
-    humberside: 7
+    north_yorkshire:  12
+    west_yorkshire:   13
+    south_yorkshire:  14
+    humberside:       16
 
 years:
   full_range: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]

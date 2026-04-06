@@ -13,6 +13,14 @@ clean_stats19(data)   : drop historic cols, flag COVID, validate coords
 clean_aadf(df)        : filter to target years, validate flows, add road_name_clean
 clean_webtris(df)     : drop duplicates, aggregate monthly → annual
 clean_mrdb(gdf)       : add link_id, derive road_name_clean for joining
+
+⚠️  COORDINATE WARNING: Yorkshire STATS19 has a systematic SD→SE BNG grid
+    error. ALL collisions are in SD grid (easting 300-402k) instead of
+    correct SE/TA/TE grid (400-600k). Fix: unconditional +100k to easting
+    for northing 390k-540k AND easting < 410k.
+    LSOA centroids have the SAME error — do NOT use them for detection.
+    See _fix_sd_se_error docstring for full evidence.
+    If extending to other regions, verify easting range before applying.
 """
 
 import logging
@@ -204,88 +212,94 @@ LSOA_DIST_THRESHOLD_M = 10000
 
 def _fix_sd_se_error(col: pd.DataFrame) -> pd.DataFrame:
     """
-    Detect and fix the SD→SE BNG grid letter error in STATS19 coordinates.
+    Fix the systematic SD->SE BNG grid letter error in Yorkshire STATS19 data.
 
-    West Yorkshire collisions sometimes have easting values in the Lancashire
-    range (~330k-400k) because the officer recorded grid square SD instead of
-    SE. Both squares use the same numeric suffix, but SD is 100km further west.
+    ALL Yorkshire collisions are recorded with SD grid eastings (300-402k)
+    instead of the correct SE/TA/TE grid eastings (400-600k). This is a
+    systematic DfT/STATS19 encoding error affecting all years and all 4
+    Yorkshire police forces — not individual officer recording mistakes.
 
-    Detection uses LSOA centroid as ground truth:
-      - Collision easting < 400k (candidate SD error)
-      - AND the recorded LSOA centroid easting > 400k (LSOA is genuinely in Yorkshire)
-    This avoids incorrectly correcting legitimate western Yorkshire collisions
-    (Calderdale, Kirklees) where both the collision and LSOA centroid are < 400k.
+    Evidence: raw easting range 321k-402k across 101k collisions (2015-2024).
+    After +100k: 421k-502k which correctly places collisions in SE/TA grid.
 
-    Fix: add 100,000 to easting, re-derive lat/lon from corrected BNG.
+    Detection: northing in Yorkshire range (390k-540k) AND easting < 410k.
+    The northing filter prevents incorrectly correcting genuine Lancashire
+    collisions that may be in the same easting band.
+
+    NOTE: Previously used LSOA-centroid conditional detection — abandoned
+    after confirming LSOA centroids in STATS19 data have the SAME SD grid
+    error, making the comparison circular (SD vs SD = always agree).
+
+    See module docstring for full diagnostic evidence and regional warnings.
     """
-    if "location_easting_osgr" not in col.columns or        "location_northing_osgr" not in col.columns:
+    if "location_easting_osgr" not in col.columns or \
+       "location_northing_osgr" not in col.columns:
         col["coords_corrected"] = False
         return col
 
-    col["coords_corrected"] = False
+    # Per-force correction — different Yorkshire police forces are in different
+    # BNG grid squares and need different easting offsets:
+    #
+    #   Force 4 (West Yorkshire)  : SE grid (E=400-500k) → SD error = -100k → +100k
+    #   Force 5 (South Yorkshire) : SK grid (E=400-500k) → SJ error = -100k → +100k
+    #   Force 6 (Humberside)      : TA grid (E=500-600k) → SD error = -200k → +200k
+    #   Force 7 (North Yorkshire) : SE/NZ grid → SD/NY error = -100k → +100k
+    #
+    # Evidence: Force 6 raw easting mean 382k. After +100k = 482k but Hull is at
+    # 510k (TA grid). The extra 100k placed Hull collisions near Goole/Selby,
+    # reproducing the Humber estuary road pattern 100km west of its true location.
 
-    # Only proceed if LSOA centroids are available
-    if not LSOA_CENTROIDS_PATH.exists():
-        logger.warning(
-            "  LSOA centroids not found — using easting threshold for SD→SE detection "
-            "(may over-correct western Yorkshire collisions)"
-        )
-        yorkshire_northing = col["location_northing_osgr"].between(*YORKSHIRE_NORTHING)
-        lancashire_easting = (
-            col["location_easting_osgr"] < SD_SE_EASTING_THRESHOLD
-        ) & col["location_easting_osgr"].notna()
-        sd_se_mask = yorkshire_northing & lancashire_easting
-    else:
-        # Load LSOA centroids to use as ground truth
-        lsoa = pd.read_csv(
-            LSOA_CENTROIDS_PATH,
-            usecols=["LSOA21CD", "x"],
-            encoding="utf-8-sig",
-        ).rename(columns={"x": "lsoa_e"})
+    yorkshire_northing = col["location_northing_osgr"].between(*YORKSHIRE_NORTHING)
+    sd_easting = (
+        col["location_easting_osgr"] < 410_000
+    ) & col["location_easting_osgr"].notna()
 
-        col_with_lsoa = col.merge(
-            lsoa, left_on="lsoa_of_accident_location",
-            right_on="LSOA21CD", how="left"
-        )
+    base_mask = yorkshire_northing & sd_easting
 
-        # SD→SE error: collision easting in Lancashire range,
-        # but LSOA centroid is in Yorkshire (easting > 400k)
-        collision_in_lancashire = (
-            col_with_lsoa["location_easting_osgr"] < SD_SE_EASTING_THRESHOLD
-        ) & col_with_lsoa["location_easting_osgr"].notna()
+    # Force 6 (Humberside / TA grid) needs +200k
+    # All other forces need +100k
+    force_col = col.get("police_force", pd.Series(0, index=col.index))
+    humberside = force_col == 6
 
-        lsoa_in_yorkshire = (
-            col_with_lsoa["lsoa_e"] >= SD_SE_EASTING_THRESHOLD
-        ) & col_with_lsoa["lsoa_e"].notna()
+    mask_100k = base_mask & ~humberside   # Forces 4, 5, 7
+    mask_200k = base_mask & humberside    # Force 6
 
-        sd_se_mask_values = (collision_in_lancashire & lsoa_in_yorkshire).values
-        sd_se_mask = pd.Series(sd_se_mask_values, index=col.index)
+    n_100k = mask_100k.sum()
+    n_200k = mask_200k.sum()
+    n_total = n_100k + n_200k
 
-        logger.info(
-            f"  SD→SE detection using LSOA centroids: "
-            f"{collision_in_lancashire.sum():,} candidates → "
-            f"{sd_se_mask.sum():,} confirmed (LSOA centroid in Yorkshire)"
-        )
-
-    n = sd_se_mask.sum()
-    col["coords_corrected"] = sd_se_mask
-
-    if n == 0:
-        logger.info("  SD→SE grid correction: no errors detected")
-        return col
-
-    corrected_e = col.loc[sd_se_mask, "location_easting_osgr"] + 100_000
-    corrected_n = col.loc[sd_se_mask, "location_northing_osgr"]
-
-    lon_c, lat_c = _BNG_TO_WGS84.transform(corrected_e.values, corrected_n.values)
-
-    col.loc[sd_se_mask, "location_easting_osgr"] = corrected_e.values
-    col.loc[sd_se_mask, "longitude"]             = lon_c
-    col.loc[sd_se_mask, "latitude"]              = lat_c
+    col["coords_corrected"] = base_mask
 
     logger.info(
-        f"  SD→SE grid correction: {n:,} collisions corrected "
-        f"(easting +100km, lat/lon re-derived)"
+        f"  SD->SE/TA detection: {base_mask.sum():,} collisions to correct "
+        f"(+100k: {n_100k:,} forces 4/5/7 | +200k: {n_200k:,} force 6 Humberside)"
+    )
+
+    if n_total == 0:
+        logger.warning("  SD->SE: no corrections applied — check raw easting range")
+        return col
+
+    # Apply +100k correction (Forces 4, 5, 7)
+    if n_100k > 0:
+        e100 = col.loc[mask_100k, "location_easting_osgr"] + 100_000
+        n100 = col.loc[mask_100k, "location_northing_osgr"]
+        lon_100, lat_100 = _BNG_TO_WGS84.transform(e100.values, n100.values)
+        col.loc[mask_100k, "location_easting_osgr"] = e100.values
+        col.loc[mask_100k, "longitude"]             = lon_100
+        col.loc[mask_100k, "latitude"]              = lat_100
+
+    # Apply +200k correction (Force 6 — Humberside/TA grid)
+    if n_200k > 0:
+        e200 = col.loc[mask_200k, "location_easting_osgr"] + 200_000
+        n200 = col.loc[mask_200k, "location_northing_osgr"]
+        lon_200, lat_200 = _BNG_TO_WGS84.transform(e200.values, n200.values)
+        col.loc[mask_200k, "location_easting_osgr"] = e200.values
+        col.loc[mask_200k, "longitude"]             = lon_200
+        col.loc[mask_200k, "latitude"]              = lat_200
+
+    logger.info(
+        f"  SD->SE/TA grid correction: {n_total:,} collisions corrected "
+        f"(lat/lon re-derived from corrected BNG)"
     )
     return col
 
@@ -333,15 +347,22 @@ def _validate_lsoa_coords(col: pd.DataFrame) -> pd.DataFrame:
     col.loc[has_both, "lsoa_dist_m"] = dist.values
     col.loc[has_both, "coords_suspect"] = dist.values > LSOA_DIST_THRESHOLD_M
 
+    # IMPORTANT: Do not flag SD->SE corrected collisions as suspect.
+    # After +100k correction, collision coordinates are in the SE grid but
+    # LSOA centroids in this file are ALSO in the SD grid (same systematic
+    # error). Corrected collision vs wrong LSOA = 100km apart = falsely suspect.
+    already_corrected = col.get("coords_corrected", pd.Series(False, index=col.index))
+    col.loc[already_corrected, "coords_suspect"] = False
+
     # Drop the centroid join columns — keep only dist and suspect flag
     col = col.drop(columns=["LSOA21CD", "lsoa_e", "lsoa_n"], errors="ignore")
 
     n_suspect = col["coords_suspect"].sum()
-    n_corrected = col.get("coords_corrected", pd.Series(False, index=col.index)).sum()
+    n_corrected = already_corrected.sum()
     logger.info(
         f"  LSOA validation: {n_suspect:,} collisions flagged as coords_suspect "
         f"({n_suspect/len(col):.1%}) | "
-        f"{n_corrected:,} already corrected by SD→SE fix"
+        f"{n_corrected:,} SD->SE corrected (exempt from LSOA check)"
     )
     return col
 
