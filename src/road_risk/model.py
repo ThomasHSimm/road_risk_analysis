@@ -101,6 +101,12 @@ def build_aadt_features(aadf: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     year_norm        : normalised year (0=2019, 0.5=2021, 1=2023)
     is_covid         : COVID year flag
 
+    Network features (joined from network_features.parquet if available):
+    degree_mean      : mean node degree at link endpoints (junction complexity)
+    betweenness      : edge betweenness centrality (through-traffic proxy)
+    dist_to_major_km : graph distance to nearest major road node
+    pop_density_per_km2 : population density of nearest LSOA
+
     Target
     ------
     log_aadt : log(all_motor_vehicles + 1) — log-transform stabilises variance
@@ -133,6 +139,51 @@ def build_aadt_features(aadf: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
             lambda x: x.fillna(x.median() if x.notna().any() else 0)
         )
         feature_cols.append("link_length_km")
+
+    # Join network features if available (via count_point_id → AADF → openroads)
+    net_path = _ROOT / "data/features/network_features.parquet"
+    aadf_or_path = _ROOT / "data/processed/aadf/aadf_clean.parquet"
+
+    if net_path.exists():
+        net = pd.read_parquet(net_path)
+        net_cols = ["degree_mean", "betweenness", "dist_to_major_km", "pop_density_per_km2"]
+
+        # AADF count points need to be spatially matched to OS Open Roads links
+        # Use the road_link_annual table which has both count_point_id and link_id
+        rla_path = _ROOT / "data/features/road_link_annual.parquet"
+        if rla_path.exists():
+            rla = pd.read_parquet(rla_path)[
+                ["link_id", "count_point_id", "year"]
+            ].dropna(subset=["count_point_id"])
+            rla["count_point_id"] = rla["count_point_id"].astype(str)
+            df["count_point_id"] = df["count_point_id"].astype(str)
+
+            # Join: AADF count_point → rla link_id → network features
+            cp_to_link = (
+                rla.groupby("count_point_id")["link_id"].first().reset_index()
+            )
+            df = df.merge(cp_to_link, on="count_point_id", how="left")
+            df = df.merge(net[["link_id"] + net_cols], on="link_id", how="left")
+
+            n_joined = df["degree_mean"].notna().sum()
+            logger.info(
+                f"  Network features joined for {n_joined:,} / {len(df):,} "
+                f"AADF count points ({n_joined/len(df):.1%})"
+            )
+            for col in net_cols:
+                if col in df.columns:
+                    feature_cols.append(col)
+        else:
+            logger.info(
+                "  road_link_annual.parquet not found — "
+                "network features not joined to AADF training data"
+            )
+    else:
+        logger.info(
+            f"  Network features not found at {net_path}\n"
+            f"  Run: python src/road_risk/network_features.py\n"
+            f"  Training without network features (CV R² will be lower)"
+        )
 
     X = df[feature_cols].copy()
     return X, target, df
@@ -224,7 +275,6 @@ def apply_aadt_estimator(
     # Build prediction features matching training schema
     or_df = openroads.copy()
     if isinstance(or_df, gpd.GeoDataFrame):
-        # Get centroid lat/lon for prediction
         bng = or_df.to_crs("EPSG:27700")
         centroids = bng.geometry.centroid.to_crs("EPSG:4326")
         or_df["latitude"]  = centroids.y
@@ -233,24 +283,40 @@ def apply_aadt_estimator(
     or_df["road_class_ord"] = or_df["road_classification"].isin(
         ["Motorway", "A Road"]
     ).astype(int)
-    or_df["is_trunk"] = or_df.get("is_trunk", pd.Series(False, index=or_df.index)).astype(int)
+    or_df["is_trunk"] = or_df.get(
+        "is_trunk", pd.Series(False, index=or_df.index)
+    ).astype(int)
+
+    # Join network features if available
+    net_path = _ROOT / "data/features/network_features.parquet"
+    net_cols = ["degree_mean", "betweenness", "dist_to_major_km", "pop_density_per_km2"]
+    if net_path.exists():
+        net = pd.read_parquet(net_path)
+        or_df = or_df.merge(net[["link_id"] + net_cols], on="link_id", how="left")
+        n_joined = or_df["degree_mean"].notna().sum()
+        logger.info(
+            f"  Network features joined for {n_joined:,} / {len(or_df):,} links"
+        )
 
     # Predict for each AADF year
     years = sorted(aadf["year"].unique())
     year_min, year_max = years[0], years[-1]
-    frames = []
+    aadf_medians = aadf.groupby("road_type")[
+        ["hgv_proportion", "link_length_km"]
+    ].median()
+    road_type_map = {"Motorway": "Major", "A Road": "Major"}
 
+    frames = []
     for year in years:
         pred_df = or_df.copy()
-        pred_df["year"] = year
-        pred_df["year_norm"]    = (year - year_min) / max(year_max - year_min, 1)
-        pred_df["is_covid"]     = year in {2020, 2021}
-        pred_df["hgv_proportion"] = np.nan  # unknown for most links
+        pred_df["year"]       = year
+        pred_df["year_norm"]  = (year - year_min) / max(year_max - year_min, 1)
+        pred_df["is_covid"]   = year in {2020, 2021}
+        pred_df["hgv_proportion"] = np.nan
 
-        # Impute missing features with AADF medians
-        aadf_medians = aadf.groupby("road_type")[["hgv_proportion", "link_length_km"]].median()
-        road_type_map = {"Motorway": "Major", "A Road": "Major"}
-        pred_df["_road_type"] = pred_df["road_classification"].map(road_type_map).fillna("Minor")
+        pred_df["_road_type"] = pred_df["road_classification"].map(
+            road_type_map
+        ).fillna("Minor")
 
         for col in ["hgv_proportion", "link_length_km"]:
             if col in feature_cols:
@@ -260,7 +326,9 @@ def apply_aadt_estimator(
                         pred_df.loc[mask & pred_df[col].isna(), col] = \
                             aadf_medians.loc[rtype, col]
 
-        X_pred = pred_df[feature_cols].fillna(0)
+        # Only use feature columns that exist (network features may be absent)
+        available_cols = [c for c in feature_cols if c in pred_df.columns]
+        X_pred = pred_df[available_cols].fillna(0)
         log_pred = model.predict(X_pred)
         pred_df["estimated_aadt"] = np.expm1(log_pred).round().astype(int)
         pred_df["estimated_aadt"] = pred_df["estimated_aadt"].clip(lower=1)
@@ -421,8 +489,479 @@ def plot_temporal_profiles(profiles: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Save / load helpers
+# Stage 2 — Collision count model (Poisson GLM + XGBoost)
 # ---------------------------------------------------------------------------
+
+ROAD_CLASS_ORDINAL = {
+    "Motorway":             6,
+    "A Road":               5,
+    "B Road":               4,
+    "Classified Unnumbered":3,
+    "Not Classified":       2,
+    "Unclassified":         1,
+    "Unknown":              0,
+}
+
+FORM_OF_WAY_ORDINAL = {
+    "Dual Carriageway":          4,
+    "Collapsed Dual Carriageway":3,
+    "Slip Road":                 2,
+    "Roundabout":                2,
+    "Single Carriageway":        1,
+    "Shared Use Carriageway":    1,
+    "Guided Busway":             0,
+}
+
+
+def build_collision_dataset(
+    openroads,
+    aadt_estimates: pd.DataFrame,
+    rla: pd.DataFrame,
+    net_features: pd.DataFrame | None = None,
+    years: list | None = None,
+) -> pd.DataFrame:
+    """
+    Build full collision dataset for Poisson modelling.
+
+    Critical: includes links with ZERO collisions, not just links where
+    collisions happened. Without zeros the model learns "how many given ≥1"
+    not "collision risk across all roads."
+
+    Steps:
+    1. All OS Open Roads links × years (705k × n_years)
+    2. Left-join collision counts from road_link_annual (NaN → 0)
+    3. Left-join AADT estimates from Stage 1a
+    4. Filter to rows where AADT is available (exposure denominator required)
+    5. Compute offset = log(AADT × link_length_km × 365 / 1e6)
+
+    Parameters
+    ----------
+    openroads      : GeoDataFrame with link geometry and attributes
+    aadt_estimates : DataFrame with link_id, year, estimated_aadt
+    rla            : road_link_annual.parquet — collision counts per link × year
+    net_features   : optional network features DataFrame
+    years          : years to include (defaults to all in aadt_estimates)
+
+    Returns
+    -------
+    DataFrame at link_id × year grain with:
+      collision_count, log_offset, feature columns, confidence flags
+    """
+    import geopandas as gpd
+
+    if years is None:
+        years = sorted(aadt_estimates["year"].unique())
+
+    logger.info(
+        f"Building collision dataset: {len(openroads):,} links × "
+        f"{len(years)} years ..."
+    )
+
+    # --- Base: all links × years -------------------------------------------
+    links = openroads[["link_id", "road_classification", "form_of_way",
+                        "link_length_km", "is_trunk", "is_primary"]].copy()
+
+    base = pd.DataFrame({
+        "link_id": np.repeat(links["link_id"].values, len(years)),
+        "year":    np.tile(years, len(links)),
+    })
+    base = base.merge(links, on="link_id", how="left")
+
+    logger.info(f"  Base table: {len(base):,} rows")
+
+    # --- Join collision counts (0 for links with no collisions) -------------
+    rla_cols = ["link_id", "year", "collision_count", "fatal_count",
+                "serious_count", "slight_count", "casualty_count"]
+    rla_trim = rla[[c for c in rla_cols if c in rla.columns]].copy()
+
+    base = base.merge(rla_trim, on=["link_id", "year"], how="left")
+    base["collision_count"] = base["collision_count"].fillna(0).astype(int)
+    base["fatal_count"]     = base["fatal_count"].fillna(0).astype(int)
+    base["serious_count"]   = base["serious_count"].fillna(0).astype(int)
+
+    n_with_collisions = (base["collision_count"] > 0).sum()
+    logger.info(
+        f"  Collisions joined: {n_with_collisions:,} link-years with ≥1 collision "
+        f"({n_with_collisions/len(base):.2%} of all link-years)"
+    )
+
+    # --- Join AADT estimates ------------------------------------------------
+    base = base.merge(aadt_estimates, on=["link_id", "year"], how="left")
+
+    # Filter to rows where we have AADT (required for exposure offset)
+    n_before = len(base)
+    base = base[base["estimated_aadt"].notna()].copy()
+    logger.info(
+        f"  After AADT filter: {len(base):,} / {n_before:,} rows "
+        f"({len(base)/n_before:.1%})"
+    )
+
+    # --- Compute log offset -------------------------------------------------
+    # offset = log(AADT × link_length_km × 365 / 1e6)
+    # = log(vehicle-km in millions per year)
+    # NaN link_length_km → use median per road classification
+    median_len = (
+        base.groupby("road_classification")["link_length_km"]
+        .transform(lambda x: x.fillna(x.median() if x.notna().any() else 0.5))
+    )
+    base["link_length_km"] = base["link_length_km"].fillna(median_len)
+
+    vehicle_km_M = base["estimated_aadt"] * base["link_length_km"] * 365 / 1e6
+    base["log_offset"] = np.log(vehicle_km_M.clip(lower=1e-6))
+
+    # --- Encode road features -----------------------------------------------
+    base["road_class_ord"] = (
+        base["road_classification"].map(ROAD_CLASS_ORDINAL).fillna(0).astype(int)
+    )
+    base["form_of_way_ord"] = (
+        base["form_of_way"].map(FORM_OF_WAY_ORDINAL).fillna(1).astype(int)
+    )
+    base["is_motorway"]     = (base["road_classification"] == "Motorway").astype(int)
+    base["is_a_road"]       = (base["road_classification"] == "A Road").astype(int)
+    base["is_slip_road"]    = (base["form_of_way"] == "Slip Road").astype(int)
+    base["is_roundabout"]   = (base["form_of_way"] == "Roundabout").astype(int)
+    base["is_dual"]         = base["form_of_way"].isin(
+        ["Dual Carriageway", "Collapsed Dual Carriageway"]
+    ).astype(int)
+    base["is_trunk"]        = base["is_trunk"].fillna(False).astype(int)
+    base["is_primary"]      = base["is_primary"].fillna(False).astype(int)
+
+    # Temporal
+    base["is_covid"]        = base["year"].isin({2020, 2021}).astype(int)
+    base["year_norm"]       = (base["year"] - base["year"].min()) / max(
+        base["year"].max() - base["year"].min(), 1
+    )
+    base["log_link_length"] = np.log(base["link_length_km"].clip(lower=0.001))
+
+    # --- Join network features if available ---------------------------------
+    if net_features is not None:
+        base = base.merge(net_features, on="link_id", how="left")
+        n_net = base["degree_mean"].notna().sum()
+        logger.info(
+            f"  Network features joined: {n_net:,} / {len(base):,} rows "
+            f"({n_net/len(base):.1%})"
+        )
+
+    logger.info(
+        f"  Collision dataset: {len(base):,} rows | "
+        f"zeros={( base['collision_count']==0).sum():,} "
+        f"({(base['collision_count']==0).mean():.1%})"
+    )
+    return base
+
+
+def train_collision_glm(df: pd.DataFrame) -> tuple:
+    """
+    Fit a Poisson GLM for collision counts with AADT exposure offset.
+
+    Model:
+        log(E[collisions]) = β×X + log(AADT × length_km × 365 / 1e6)
+
+    The log_offset term anchors predictions to traffic exposure so the
+    model learns risk factors *above and beyond* what traffic volume explains.
+
+    Uses statsmodels for interpretable coefficients and confidence intervals.
+
+    Returns
+    -------
+    result   : statsmodels GLM result object
+    features : list of feature column names used
+    summary  : dict of key metrics
+    """
+    try:
+        import statsmodels.api as sm
+    except ImportError:
+        raise ImportError(
+            "statsmodels required for Poisson GLM. "
+            "Install with: pip install statsmodels"
+        )
+
+    logger.info("Fitting Poisson GLM (statsmodels) ...")
+
+    feature_cols = [
+        "road_class_ord",
+        "form_of_way_ord",
+        "is_motorway",
+        "is_a_road",
+        "is_slip_road",
+        "is_roundabout",
+        "is_dual",
+        "is_trunk",
+        "is_primary",
+        "log_link_length",
+        "is_covid",
+        "year_norm",
+    ]
+
+    # Add network features if available
+    for col in ["degree_mean", "betweenness", "dist_to_major_km",
+                "pop_density_per_km2"]:
+        if col in df.columns and df[col].notna().sum() > 100:
+            feature_cols.append(col)
+
+    # Drop rows with any NaN in features or offset
+    model_df = df[feature_cols + ["collision_count", "log_offset"]].dropna()
+    logger.info(
+        f"  GLM training rows: {len(model_df):,} "
+        f"(dropped {len(df)-len(model_df):,} with missing features)"
+    )
+
+    X = sm.add_constant(model_df[feature_cols].astype(float))
+    y = model_df["collision_count"].astype(int)
+    offset = model_df["log_offset"].astype(float)
+
+    glm = sm.GLM(
+        y, X,
+        family=sm.families.Poisson(),
+        offset=offset,
+    )
+    result = glm.fit(maxiter=100)
+
+    # Key metrics
+    summary = {
+        "n_obs":        len(model_df),
+        "deviance":     float(result.deviance),
+        "null_deviance":float(result.null_deviance),
+        "pseudo_r2":    float(1 - result.deviance / result.null_deviance),
+        "aic":          float(result.aic),
+        "converged":    result.converged,
+        "features":     feature_cols,
+    }
+
+    logger.info(
+        f"  Poisson GLM: pseudo-R²={summary['pseudo_r2']:.3f} | "
+        f"deviance={summary['deviance']:,.0f} | "
+        f"AIC={summary['aic']:,.0f} | "
+        f"converged={summary['converged']}"
+    )
+
+    # Log significant coefficients
+    coef_df = pd.DataFrame({
+        "coef":   result.params,
+        "pvalue": result.pvalues,
+        "ci_low": result.conf_int()[0],
+        "ci_high":result.conf_int()[1],
+    }).round(4)
+    sig = coef_df[coef_df["pvalue"] < 0.05].sort_values("coef", ascending=False)
+    logger.info(f"  Significant coefficients (p<0.05):\n{sig.to_string()}")
+
+    return result, feature_cols, summary
+
+
+def train_collision_xgb(df: pd.DataFrame) -> tuple:
+    """
+    Fit an XGBoost Poisson regression for collision counts.
+
+    Complements the GLM — captures non-linear interactions that the
+    linear GLM misses. Uses log_offset as an exposure weight.
+
+    Returns
+    -------
+    model    : fitted XGBRegressor
+    features : list of feature column names
+    metrics  : dict of evaluation metrics
+    """
+    try:
+        from xgboost import XGBRegressor
+    except ImportError:
+        raise ImportError(
+            "xgboost required. Install with: pip install xgboost"
+        )
+
+    logger.info("Fitting XGBoost Poisson model ...")
+
+    feature_cols = [
+        "road_class_ord", "form_of_way_ord",
+        "is_motorway", "is_a_road", "is_slip_road",
+        "is_roundabout", "is_dual",
+        "is_trunk", "is_primary",
+        "log_link_length", "is_covid", "year_norm",
+        "estimated_aadt",
+    ]
+    for col in ["degree_mean", "betweenness", "dist_to_major_km",
+                "pop_density_per_km2"]:
+        if col in df.columns and df[col].notna().sum() > 100:
+            feature_cols.append(col)
+
+    model_df = df[feature_cols + ["collision_count", "log_offset"]].dropna()
+
+    X = model_df[feature_cols].astype(float)
+    y = model_df["collision_count"].astype(float)
+
+    # GroupKFold by link_id — same link shouldn't appear in train and test
+    from sklearn.model_selection import GroupKFold
+    groups = model_df.index  # each row is a link-year; use link_id if available
+
+    model = XGBRegressor(
+        objective="count:poisson",
+        n_estimators=300,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+        verbosity=0,
+    )
+
+    # Simple train/test split (80/20) for evaluation
+    from sklearn.model_selection import train_test_split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=RANDOM_STATE
+    )
+
+    offset_train = model_df.loc[X_train.index, "log_offset"].values
+    offset_test  = model_df.loc[X_test.index,  "log_offset"].values
+
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_test, y_test)],
+        verbose=False,
+    )
+
+    y_pred = model.predict(X_test)
+
+    # Poisson deviance on test set
+    eps = 1e-6
+    deviance = 2 * np.sum(
+        np.where(y_test > 0, y_test * np.log((y_test + eps) / (y_pred + eps)), 0)
+        - (y_test - y_pred)
+    )
+    null_pred = np.full_like(y_pred, y_test.mean())
+    null_dev  = 2 * np.sum(
+        np.where(y_test > 0, y_test * np.log((y_test + eps) / (null_pred + eps)), 0)
+        - (y_test - null_pred)
+    )
+    pseudo_r2 = 1 - deviance / null_dev if null_dev > 0 else np.nan
+
+    # Feature importance
+    importance = pd.Series(
+        model.feature_importances_, index=feature_cols
+    ).sort_values(ascending=False)
+
+    metrics = {
+        "n_train":    len(X_train),
+        "n_test":     len(X_test),
+        "pseudo_r2":  float(pseudo_r2),
+        "deviance":   float(deviance),
+        "features":   feature_cols,
+    }
+
+    logger.info(
+        f"  XGBoost Poisson: pseudo-R²={pseudo_r2:.3f} | "
+        f"test deviance={deviance:,.0f}"
+    )
+    logger.info(f"  Feature importance (top 10):\n"
+                f"{importance.head(10).to_string()}")
+
+    return model, feature_cols, metrics
+
+
+def apply_collision_model(
+    glm_result,
+    xgb_model,
+    glm_features: list,
+    xgb_features: list,
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Apply both collision models to produce risk scores for all link-years.
+
+    Outputs
+    -------
+    predicted_glm      : Poisson GLM predicted collision rate
+    predicted_xgb      : XGBoost predicted collision rate
+    residual_glm       : observed - predicted (GLM) — positive = more dangerous
+                         than model expects given traffic
+    risk_score         : standardised risk percentile (0–100)
+    confidence         : 'high' where AADT is measured, 'modelled' elsewhere
+    """
+    import statsmodels.api as sm
+
+    results = df.copy()
+
+    # GLM predictions
+    X_glm = sm.add_constant(
+        df[glm_features].fillna(0).astype(float),
+        has_const=True,
+    )
+    # Ensure constant column exists even if model was fit with it
+    if "const" not in X_glm.columns:
+        X_glm.insert(0, "const", 1.0)
+
+    results["predicted_glm"] = glm_result.predict(
+        X_glm, offset=df["log_offset"].fillna(0)
+    )
+
+    # XGBoost predictions
+    X_xgb = df[xgb_features].fillna(0).astype(float)
+    results["predicted_xgb"] = xgb_model.predict(X_xgb)
+
+    # Residual (observed - expected) — key risk signal
+    results["residual_glm"] = results["collision_count"] - results["predicted_glm"]
+
+    # Normalised risk score: predicted_glm as percentile across all links
+    results["risk_percentile"] = results["predicted_glm"].rank(pct=True) * 100
+
+    # For links with ≥1 collision: residual percentile (unexplained risk)
+    has_collision = results["collision_count"] > 0
+    results.loc[has_collision, "excess_risk_percentile"] = (
+        results.loc[has_collision, "residual_glm"]
+        .rank(pct=True) * 100
+    )
+
+    logger.info(
+        f"  Risk scores applied to {len(results):,} link-years\n"
+        f"  Mean predicted collisions/year: {results['predicted_glm'].mean():.4f}\n"
+        f"  Links in top 1% risk: "
+        f"{(results['risk_percentile'] >= 99).sum():,}"
+    )
+    return results
+
+
+def save_collision_outputs(
+    glm_result,
+    xgb_model,
+    glm_features: list,
+    xgb_features: list,
+    glm_summary: dict,
+    xgb_metrics: dict,
+    risk_scores: pd.DataFrame,
+) -> None:
+    """Save Stage 2 model outputs."""
+    import pickle
+
+    MODELS.mkdir(parents=True, exist_ok=True)
+
+    # GLM result
+    glm_result.save(str(MODELS / "collision_glm.pkl"))
+    logger.info(f"  Saved Poisson GLM to {MODELS / 'collision_glm.pkl'}")
+
+    # XGBoost model
+    xgb_model.save_model(str(MODELS / "collision_xgb.json"))
+    logger.info(f"  Saved XGBoost model to {MODELS / 'collision_xgb.json'}")
+
+    # Risk scores
+    risk_out = MODELS / "risk_scores.parquet"
+    risk_scores[[
+        "link_id", "year", "collision_count",
+        "predicted_glm", "predicted_xgb",
+        "residual_glm", "risk_percentile",
+    ]].to_parquet(risk_out, index=False)
+    logger.info(f"  Saved risk scores to {risk_out} ({len(risk_scores):,} rows)")
+
+    # Metrics summary
+    metrics_path = MODELS / "collision_metrics.json"
+    import json
+    with open(metrics_path, "w") as f:
+        json.dump({
+            "glm": glm_summary,
+            "xgb": xgb_metrics,
+        }, f, indent=2)
+    logger.info(f"  Saved metrics to {metrics_path}")
+
+
+
 
 def save_models(
     aadt_model,
@@ -472,24 +1011,19 @@ def main(stage: str = "all") -> None:
         aadf      = pd.read_parquet(AADF_PATH)
         openroads = gpd.read_parquet(OPENROADS_PATH)
 
-        # Train
         model, metrics, features = train_aadt_estimator(aadf)
-
-        # Apply to all links
         estimates = apply_aadt_estimator(model, features, openroads, aadf)
 
         print("\n=== AADT estimator results ===")
         print(f"  CV R²  : {metrics['cv_r2_mean']:.3f} (±{metrics['cv_r2_std']:.3f})")
         print(f"  CV MAE : {metrics['cv_mae_mean']:.3f} log-units "
-              f"≈ {np.expm1(metrics['cv_mae_mean']):.0f} vehicles/day")
+              f"≈ ×{np.expm1(metrics['cv_mae_mean']):.2f} multiplicative error")
         print(f"  Features: {features}")
         print(f"\n  Estimated AADT distribution:")
         print(estimates["estimated_aadt"].describe().round(0).to_string())
 
-        # Sense check: compare estimates vs actual for training data
         X_train, y_train, _ = build_aadt_features(aadf)
         y_pred = model.predict(X_train)
-        residuals = y_train - y_pred
         print(f"\n  Training residuals (log scale):")
         print(f"    MAE  : {mean_absolute_error(y_train, y_pred):.4f}")
         print(f"    RMSE : {mean_squared_error(y_train, y_pred)**0.5:.4f}")
@@ -519,17 +1053,128 @@ def main(stage: str = "all") -> None:
 
         plot_temporal_profiles(profiles)
 
+    if stage in ("collision", "all"):
+        logger.info("=== Stage 2: Collision model ===")
+
+        # Load data
+        openroads = gpd.read_parquet(OPENROADS_PATH)
+        rla       = pd.read_parquet(RLA_PATH)
+
+        # Load AADT estimates (run --stage traffic first)
+        aadt_est_path = MODELS / "aadt_estimates.parquet"
+        if not aadt_est_path.exists():
+            # Fall back to running Stage 1 inline
+            logger.warning(
+                "aadt_estimates.parquet not found — running Stage 1a first"
+            )
+            aadf     = pd.read_parquet(AADF_PATH)
+            m, mets, feats = train_aadt_estimator(aadf)
+            estimates = apply_aadt_estimator(m, feats, openroads, aadf)
+            MODELS.mkdir(parents=True, exist_ok=True)
+            estimates.to_parquet(aadt_est_path, index=False)
+        else:
+            estimates = pd.read_parquet(aadt_est_path)
+
+        # Load network features if available
+        net_path = _ROOT / "data/features/network_features.parquet"
+        net_features = pd.read_parquet(net_path) if net_path.exists() else None
+        if net_features is None:
+            logger.warning(
+                "Network features not found — run network_features.py first"
+            )
+
+        # Build full dataset (all links × years, including zeros)
+        df = build_collision_dataset(
+            openroads, estimates, rla,
+            net_features=net_features,
+        )
+
+        # Fit GLM
+        glm_result, glm_features, glm_summary = train_collision_glm(df)
+
+        # Fit XGBoost
+        try:
+            xgb_model, xgb_features, xgb_metrics = train_collision_xgb(df)
+            has_xgb = True
+        except ImportError:
+            logger.warning("XGBoost not installed — skipping. pip install xgboost")
+            has_xgb = False
+
+        # Apply models and compute risk scores
+        if has_xgb:
+            risk_scores = apply_collision_model(
+                glm_result, xgb_model,
+                glm_features, xgb_features, df
+            )
+        else:
+            # GLM only
+            import statsmodels.api as sm
+            risk_scores = df.copy()
+            X_glm = sm.add_constant(
+                df[glm_features].fillna(0).astype(float)
+            )
+            risk_scores["predicted_glm"] = glm_result.predict(
+                X_glm, offset=df["log_offset"].fillna(0)
+            )
+            risk_scores["residual_glm"] = (
+                risk_scores["collision_count"] - risk_scores["predicted_glm"]
+            )
+            risk_scores["risk_percentile"] = (
+                risk_scores["predicted_glm"].rank(pct=True) * 100
+            )
+
+        print("\n=== Collision model results ===")
+        print(f"  Poisson GLM pseudo-R²: {glm_summary['pseudo_r2']:.3f}")
+        print(f"  Training rows: {glm_summary['n_obs']:,}")
+        if has_xgb:
+            print(f"  XGBoost pseudo-R²: {xgb_metrics['pseudo_r2']:.3f}")
+
+        print(f"\n  Top 1% highest-risk links:")
+        top = risk_scores[risk_scores["risk_percentile"] >= 99].sort_values(
+            "predicted_glm", ascending=False
+        )
+        print(f"    {len(top):,} link-years in top 1%")
+        if "road_classification" in top.columns:
+            print(f"    Road type breakdown:")
+            print(top["road_classification"].value_counts().head(5).to_string())
+
+        print(f"\n  GLM coefficients (significant):")
+        coef_df = pd.DataFrame({
+            "coef":   glm_result.params,
+            "pvalue": glm_result.pvalues,
+        }).round(4)
+        print(coef_df[coef_df["pvalue"] < 0.05].sort_values(
+            "coef", ascending=False
+        ).to_string())
+
+        # Save
+        if has_xgb:
+            save_collision_outputs(
+                glm_result, xgb_model,
+                glm_features, xgb_features,
+                glm_summary, xgb_metrics,
+                risk_scores,
+            )
+        else:
+            MODELS.mkdir(parents=True, exist_ok=True)
+            glm_result.save(str(MODELS / "collision_glm.pkl"))
+            risk_scores[[
+                "link_id", "year", "collision_count",
+                "predicted_glm", "residual_glm", "risk_percentile",
+            ]].to_parquet(MODELS / "risk_scores.parquet", index=False)
+            logger.info("Saved GLM outputs")
+
     if stage == "all":
-        logger.info("=== Saving all model outputs ===")
-        save_models(model, metrics, features, estimates, profiles)
-        logger.info("=== Complete ===")
+        logger.info("=== All stages complete ===")
+
+
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Road risk traffic models")
     parser.add_argument(
         "--stage",
-        choices=["traffic", "temporal", "all"],
+        choices=["traffic", "temporal", "collision", "all"],
         default="all",
         help="Which model stage to run (default: all)",
     )
