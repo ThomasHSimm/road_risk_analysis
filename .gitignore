@@ -23,7 +23,7 @@ reports/**
 !reports/.gitkeep
 
 # Notebooks — strip outputs before commit (use nbstripout)
-notebooks/*.ipynb
+# notebooks/*.ipynb
 
 # Quarto build output
 docs/quarto/_site/
